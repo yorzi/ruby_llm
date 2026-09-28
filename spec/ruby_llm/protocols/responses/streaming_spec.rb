@@ -166,6 +166,21 @@ RSpec.describe RubyLLM::Protocols::Responses::Streaming do
     expect(chunk.finish_reason).to eq(:stop)
   end
 
+  it 'reads usage from a completed event that arrives split across reads' do
+    completed = { type: 'response.completed',
+                  response: { model: 'gpt-5-nano', status: 'completed', error: nil,
+                              usage: { input_tokens: 10, output_tokens: 7 } } }
+    event = "event: response.completed\ndata: #{JSON.generate(completed)}\n\n"
+    split = event.index('{"model"')
+    chunks = []
+    handler = protocol.send(:handle_stream) { |chunk| chunks << chunk }
+    env = Faraday::Env.from(status: 200)
+
+    [event[0...split], event[split..]].each { |read| handler.call(read, read.bytesize, env) }
+
+    expect(chunks.map { |chunk| chunk.tokens.output }).to eq([7])
+  end
+
   it 'reports the completed status as finish_reason for function-call responses' do
     chunk = build_chunk({
                           'type' => 'response.completed',
