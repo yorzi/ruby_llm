@@ -7,7 +7,7 @@ RSpec.describe RubyLLM::CodeExecution::RubyInstallation do
   let(:prefix) { File.join(root, 'ruby') }
   let(:gem_dir) { File.join(prefix, 'lib', 'ruby', 'gems', '4.0.0') }
   let(:bundle) { File.join(root, 'bundle') }
-  let(:installation) { described_class.new(prefix:, gem_dir:, gem_path: [bundle, gem_dir]) }
+  let(:installation) { described_class.new(prefix:, gem_dir:, gem_path: [bundle, gem_dir], archdir:) }
 
   after { FileUtils.rm_rf(root) }
 
@@ -16,6 +16,10 @@ RSpec.describe RubyLLM::CodeExecution::RubyInstallation do
     defined?(Gem::BUNDLED_GEMS::SINCE)
   rescue LoadError
     false
+  end
+
+  def archdir
+    File.join(prefix, 'lib', 'ruby', '4.0.0', 'arm64-darwin25')
   end
 
   def extensions
@@ -51,6 +55,71 @@ RSpec.describe RubyLLM::CodeExecution::RubyInstallation do
 
   it 'mounts the Ruby installation' do
     expect(installation.readable).to eq([prefix])
+  end
+
+  describe 'libraries the extensions link' do
+    def cellar
+      File.join(root, 'homebrew', 'Cellar', 'libyaml', '0.2.5', 'lib')
+    end
+
+    def opt
+      File.join(root, 'homebrew', 'opt', 'libyaml')
+    end
+
+    before do
+      FileUtils.mkdir_p([archdir, cellar, File.dirname(opt)])
+      File.write(File.join(archdir, 'psych.bundle'), '')
+      File.write(File.join(prefix, 'lib', 'libruby.4.0.dylib'), '')
+      File.write(File.join(cellar, 'libyaml-0.2.dylib'), '')
+      File.symlink(File.dirname(cellar), opt)
+    end
+
+    def otool_lists(*libraries)
+      lines = libraries.map { |library| "\t#{library} (compatibility version 1.0.0, current version 1.0.0)\n" }
+      allow(Open3).to receive(:capture2).with('otool', '-L', File.join(archdir, 'psych.bundle'))
+                                        .and_return(["#{archdir}/psych.bundle:\n#{lines.join}", nil])
+    end
+
+    it 'mounts the real directory of a library outside the installation' do
+      otool_lists(File.join(prefix, 'lib', 'libruby.4.0.dylib'), File.join(opt, 'lib', 'libyaml-0.2.dylib'),
+                  '/usr/lib/libSystem.B.dylib', '/System/Library/Frameworks/Security.framework/Security')
+
+      expect(installation.readable).to eq([prefix, File.realpath(cellar)])
+    end
+
+    it 'mounts each library directory once' do
+      otool_lists(File.join(opt, 'lib', 'libyaml-0.2.dylib'), File.join(cellar, 'libyaml-0.2.dylib'))
+
+      expect(installation.readable).to eq([prefix, File.realpath(cellar)])
+    end
+
+    it 'skips a listed library that is not on disk' do
+      otool_lists(File.join(root, 'missing', 'libgone.dylib'))
+
+      expect(installation.readable).to eq([prefix])
+    end
+
+    it 'mounts only the installation when otool is not installed' do
+      allow(Open3).to receive(:capture2).and_raise(Errno::ENOENT)
+
+      expect(installation.readable).to eq([prefix])
+    end
+
+    it 'reads the extensions once' do
+      otool_lists(File.join(opt, 'lib', 'libyaml-0.2.dylib'))
+
+      2.times { installation.readable }
+
+      expect(Open3).to have_received(:capture2).once
+    end
+
+    it 'does not look for libraries without extension bundles' do
+      FileUtils.rm(File.join(archdir, 'psych.bundle'))
+      allow(Open3).to receive(:capture2)
+
+      expect(installation.readable).to eq([prefix])
+      expect(Open3).not_to have_received(:capture2)
+    end
   end
 
   it "hides the application's gems, keeping Ruby's default and bundled gems" do
